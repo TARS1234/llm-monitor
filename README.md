@@ -7,6 +7,14 @@ Works on **macOS** (Apple Silicon + Intel), **Linux**, and **Windows**.
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue)
 
+## Screenshots
+
+**Multiple Ollama models queued, Claude Code + Aider active**
+![llm-monitor with Ollama models running](assets/screenshot-ollama.png)
+
+**GPU/ANE metrics, single Ollama model, Coding Agents panel**
+![llm-monitor with coding agents](assets/screenshot-coding-agents.png)
+
 ## Features
 
 **System metrics**

@@ -1,8 +1,16 @@
 #!/bin/bash
 # Launcher for llm_monitor.py
+# On macOS, re-execs with sudo to unlock GPU/ANE/thermal/power metrics.
 # Looks for a local .venv first, then falls back to system python3.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# macOS: powermetrics requires root for GPU/ANE/power/thermal metrics.
+# Re-exec the whole script under sudo if not already root.
+if [[ "$(uname)" == "Darwin" && "$(id -u)" -ne 0 ]]; then
+    echo "Re-launching with sudo for full GPU/ANE/power/thermal metrics..."
+    exec sudo "$0" "$@"
+fi
 
 if [ -f "$SCRIPT_DIR/.venv/bin/activate" ]; then
     source "$SCRIPT_DIR/.venv/bin/activate"

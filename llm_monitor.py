@@ -119,6 +119,12 @@ class NvidiaStats:
     gpu_name: str = ""
 
 @dataclass
+class AMDStats:
+    gpu_name: str = ""
+    vram_gb: Optional[float] = None
+    detected: bool = False
+
+@dataclass
 class MemoryStats:
     total_gb: float = 0.0
     used_gb: float = 0.0
@@ -395,6 +401,42 @@ def collect_nvidia_stats() -> NvidiaStats:
             s.power_w = val if val > 0 else None
         except Exception:
             pass
+    except Exception:
+        pass
+    return s
+
+
+
+
+def collect_amd_stats_macos():
+    """Detect AMD GPU on Intel Macs using system_profiler."""
+    class AMDStats:
+        def __init__(self):
+            self.gpu_name = ""
+            self.vram_gb = None
+            self.detected = False
+
+    s = AMDStats()
+    if not IS_MACOS:
+        return s
+    try:
+        out = subprocess.check_output(
+            ["system_profiler", "SPDisplaysDataType"],
+            text=True, stderr=subprocess.DEVNULL, timeout=3
+        )
+        for line in out.split('\n'):
+            line = line.strip()
+            if 'Chipset Model:' in line and ('AMD' in line or 'Radeon' in line):
+                s.gpu_name = line.split('Chipset Model:')[1].strip()
+            if 'VRAM' in line and s.gpu_name:
+                import re
+                match = re.search(r'(\d+)\s*(GB|MB)', line)
+                if match:
+                    size, unit = match.groups()
+                    s.vram_gb = float(size) if unit == 'GB' else float(size) / 1024
+                    break
+        if s.gpu_name:
+            s.detected = True
     except Exception:
         pass
     return s
@@ -710,14 +752,50 @@ def _temp_color(temp: Optional[float]) -> str:
 def _na(reason: str = "") -> str:
     return f"[dim]N/A{(' (' + reason + ')') if reason else ''}[/]"
 
+def _get_responsive_widths(term_width: int) -> dict:
+    """Calculate responsive column widths based on terminal width."""
+    if term_width < 80:  # Very narrow (mobile portrait)
+        return {
+            "label": 12,
+            "table_pid": 5,
+            "table_cpu": 4,
+            "table_rss": 4,
+            "table_status": 6,
+            "table_model": 16,
+            "table_dir": 10,
+            "table_tool": 6,
+        }
+    elif term_width < 120:  # Narrow (mobile landscape / small terminal)
+        return {
+            "label": 18,
+            "table_pid": 6,
+            "table_cpu": 5,
+            "table_rss": 5,
+            "table_status": 8,
+            "table_model": 20,
+            "table_dir": 14,
+            "table_tool": 7,
+        }
+    else:  # Normal/wide screen
+        return {
+            "label": 22,
+            "table_pid": 6,
+            "table_cpu": 5,
+            "table_rss": 5,
+            "table_status": 8,
+            "table_model": 28,
+            "table_dir": 16,
+            "table_tool": 7,
+        }
+
 
 # ── Panel builders ────────────────────────────────────────────────────────────
 
 def build_cpu_panel(cpu: CPUStats, pm: ThermalPowerMetrics,
                     extra_cpu_temp: Optional[float],
-                    linux_pkg_power: Optional[float]) -> Panel:
+                    linux_pkg_power: Optional[float], label_width: int = 22) -> Panel:
     t = Table(show_header=False, box=None, padding=(0, 1))
-    t.add_column("Label", style="bold cyan", width=22)
+    t.add_column("Label", style="bold cyan", width=label_width)
     t.add_column("Value")
 
     t.add_row("Overall CPU", _bar(cpu.overall_percent))
@@ -759,9 +837,9 @@ def build_cpu_panel(cpu: CPUStats, pm: ThermalPowerMetrics,
 
 
 def build_gpu_ane_panel(pm: ThermalPowerMetrics, nvidia: NvidiaStats,
-                         extra_gpu_temp: Optional[float]) -> Panel:
+                         amd, extra_gpu_temp: Optional[float], label_width: int = 22) -> Panel:
     t = Table(show_header=False, box=None, padding=(0, 1))
-    t.add_column("Label", style="bold magenta", width=22)
+    t.add_column("Label", style="bold magenta", width=label_width)
     t.add_column("Value")
 
     # GPU utilization
@@ -770,6 +848,11 @@ def build_gpu_ane_panel(pm: ThermalPowerMetrics, nvidia: NvidiaStats,
     elif nvidia.util_pct is not None:
         label = f"GPU Util ({nvidia.gpu_name[:16]})" if nvidia.gpu_name else "GPU Utilization"
         t.add_row(label, _bar(nvidia.util_pct))
+    elif amd and amd.detected:
+        label = f"GPU ({amd.gpu_name[:20]})" if amd.gpu_name else "AMD GPU"
+        t.add_row(label, "[dim]monitoring unavailable[/]")
+        if amd.vram_gb:
+            t.add_row("AMD VRAM", f"[magenta]{amd.vram_gb:.1f} GB[/]")
     elif IS_MACOS and not IS_ROOT:
         t.add_row("GPU Utilization", _na("needs sudo"))
     else:
@@ -813,9 +896,9 @@ def build_gpu_ane_panel(pm: ThermalPowerMetrics, nvidia: NvidiaStats,
     return Panel(t, title="[bold white]GPU / ANE / Power", border_style="magenta")
 
 
-def build_memory_panel(mem: MemoryStats) -> Panel:
+def build_memory_panel(mem: MemoryStats, label_width: int = 22) -> Panel:
     t = Table(show_header=False, box=None, padding=(0, 1))
-    t.add_column("Label", style="bold blue", width=22)
+    t.add_column("Label", style="bold blue", width=label_width)
     t.add_column("Value")
 
     t.add_row("RAM Used / Total",
@@ -851,18 +934,20 @@ def build_memory_panel(mem: MemoryStats) -> Panel:
     return Panel(t, title="[bold white]Memory", border_style="blue")
 
 
-def build_ollama_panel(procs: list) -> Panel:
+def build_ollama_panel(procs: list, widths: dict = None) -> Panel:
+    if widths is None:
+        widths = _get_responsive_widths(120)  # default
     if not procs:
         return Panel(
             "[dim]No Ollama processes detected.\nStart a model: ollama run <model>[/]",
             title="[bold white]Ollama", border_style="yellow",
         )
     t = Table(show_header=True, box=box.SIMPLE, header_style="bold yellow")
-    t.add_column("PID",    width=6)
-    t.add_column("CPU%",   width=5)
-    t.add_column("RSS",    width=5)
-    t.add_column("Status", width=8)
-    t.add_column("Model",  width=28)
+    t.add_column("PID",    width=widths["table_pid"])
+    t.add_column("CPU%",   width=widths["table_cpu"])
+    t.add_column("RSS",    width=widths["table_rss"])
+    t.add_column("Status", width=widths["table_status"])
+    t.add_column("Model",  width=widths["table_model"])
     for p in procs:
         cc = "red" if p.cpu_percent > 80 else "yellow" if p.cpu_percent > 40 else "green"
         t.add_row(str(p.pid),
@@ -875,19 +960,23 @@ def build_ollama_panel(procs: list) -> Panel:
 
 _CODING_AGENT_COLORS = {"Claude": "green", "Aider": "yellow"}
 
-def build_coding_agents_panel(procs: list) -> Panel:
+def build_coding_agents_panel(procs: list, widths: dict = None) -> Panel:
+    if widths is None:
+        widths = _get_responsive_widths(120)  # default
     if not procs:
         return Panel(
             "[dim]No Claude / Aider processes detected.[/]",
             title="[bold white]Coding Agents", border_style="green",
         )
     t = Table(show_header=True, box=box.SIMPLE, header_style="bold green")
-    t.add_column("Tool",   width=7)
-    t.add_column("CPU%",   width=5)
-    t.add_column("RSS",    width=5)
-    t.add_column("Status", width=8)
-    t.add_column("Model",  width=24)
-    t.add_column("Dir",    width=16)
+    t.add_column("Tool",   width=widths["table_tool"])
+    t.add_column("CPU%",   width=widths["table_cpu"])
+    t.add_column("RSS",    width=widths["table_rss"])
+    t.add_column("Status", width=widths["table_status"])
+    # Adjust model width for very narrow screens
+    model_width = max(10, widths["table_model"] - 4) if console.size.width < 80 else widths["table_model"] - 4
+    t.add_column("Model",  width=model_width)
+    t.add_column("Dir",    width=widths["table_dir"])
     for p in procs:
         color  = _CODING_AGENT_COLORS.get(p.tool, "white")
         cc     = "red" if p.cpu_percent > 80 else "yellow" if p.cpu_percent > 40 else "green"
@@ -905,18 +994,20 @@ def build_coding_agents_panel(procs: list) -> Panel:
 
 _AGENT_COLORS = {"Codex": "cyan", "Gemini": "blue", "Grok": "magenta"}
 
-def build_other_agents_panel(procs: list) -> Panel:
+def build_other_agents_panel(procs: list, widths: dict = None) -> Panel:
+    if widths is None:
+        widths = _get_responsive_widths(120)  # default
     if not procs:
         idle = Text("  Codex  ·  Gemini  ·  Grok  — no processes detected", style="dim")
         return Panel(idle, title="[bold white]Other AI Agents", border_style="dim")
 
     t = Table(show_header=True, box=box.SIMPLE, header_style="bold white")
-    t.add_column("Tool",    width=8)
-    t.add_column("PID",     width=7)
-    t.add_column("CPU%",    width=6)
-    t.add_column("RSS GB",  width=7)
-    t.add_column("Status",  width=10)
-    t.add_column("Working Dir", width=28)
+    t.add_column("Tool",    width=widths["table_tool"] + 1)
+    t.add_column("PID",     width=widths["table_pid"] + 1)
+    t.add_column("CPU%",    width=widths["table_cpu"] + 1)
+    t.add_column("RSS GB",  width=widths["table_rss"] + 2)
+    t.add_column("Status",  width=widths["table_status"] + 2)
+    t.add_column("Working Dir", width=min(28, widths["table_model"]))
     for p in procs:
         color   = _AGENT_COLORS.get(p.tool, "white")
         cpu_col = "red" if p.cpu_percent > 80 else "yellow" if p.cpu_percent > 40 else "green"
@@ -933,9 +1024,9 @@ def build_other_agents_panel(procs: list) -> Panel:
                  border_style="white")
 
 
-def build_system_panel(cpu: CPUStats) -> Panel:
+def build_system_panel(cpu: CPUStats, label_width: int = 22) -> Panel:
     t = Table(show_header=False, box=None, padding=(0, 1))
-    t.add_column("Label", style="bold white", width=22)
+    t.add_column("Label", style="bold white", width=label_width)
     t.add_column("Value")
     read_mbs, write_mbs = get_disk_io()
     t.add_row("Disk Read",  f"[green]{read_mbs:.2f} MB/s[/]")
@@ -977,40 +1068,77 @@ def build_dashboard(interval: float, show_ollama: bool, show_claude: bool) -> No
                 mem    = collect_memory()
                 pm     = collect_powermetrics()
                 nvidia = collect_nvidia_stats()
+                amd = collect_amd_stats_macos() if IS_MACOS else None
                 linux_pkg_power    = collect_linux_rapl_power()
                 extra_cpu_temp, extra_gpu_temp = collect_temps()
                 ollama_procs  = collect_ollama_processes() if show_ollama else []
                 coding_procs  = collect_coding_agent_processes() if show_claude else []
                 agent_procs   = collect_ai_agent_processes()
 
-                # Adaptive sizing: row1 gets ~45% of usable height, min 12, max 20
-                term_h    = console.size.height
-                row3_size = 3 if not agent_procs else max(5, 3 + len(agent_procs))
-                usable    = term_h - 6 - row3_size   # subtract header+footer+row3
-                row1_size = max(12, min(20, int(usable * 0.45)))
+                # Adaptive sizing: get terminal dimensions
+                term_h = console.size.height
+                term_w = console.size.width
+                widths = _get_responsive_widths(term_w)
+
+                # Collapse "Other AI Agents" when empty, expand based on count
+                row3_size = 3 if not agent_procs else max(5, min(3 + len(agent_procs), 10))
+
+                # Calculate row2 size based on coding agents (Claude/Aider) + Ollama
+                coding_rows = max(3, len(coding_procs) + 2) if coding_procs else 3
+                ollama_rows = max(3, len(ollama_procs) + 2) if ollama_procs else 3
+                row2_size = max(8, coding_rows + ollama_rows)
+
+                # Allocate remaining space to row1 (CPU/GPU/Memory)
+                usable = term_h - 6 - row3_size - row2_size  # header+footer+row3+row2
+                row1_size = max(12, usable)
 
                 layout = Layout()
                 layout.split_column(
                     Layout(Panel(header, border_style="dark_blue"), size=3),
                     Layout(name="row1", size=row1_size),
-                    Layout(name="row2"),
+                    Layout(name="row2", size=row2_size),
                     Layout(name="row3", size=row3_size),
                     Layout(Panel(footer, border_style="dim"), size=3),
                 )
-                layout["row1"].split_row(
-                    Layout(build_cpu_panel(cpu, pm, extra_cpu_temp, linux_pkg_power)),
-                    Layout(build_gpu_ane_panel(pm, nvidia, extra_gpu_temp)),
-                    Layout(build_memory_panel(mem)),
-                )
-                layout["row2"].split_row(
-                    Layout(name="row2_left", ratio=3),
-                    Layout(build_system_panel(cpu), ratio=1),
-                )
-                layout["row2_left"].split_column(
-                    Layout(build_ollama_panel(ollama_procs)),
-                    Layout(build_coding_agents_panel(coding_procs)),
-                )
-                layout["row3"].update(build_other_agents_panel(agent_procs))
+
+                # Build panels with responsive widths
+                cpu_panel = build_cpu_panel(cpu, pm, extra_cpu_temp, linux_pkg_power, widths["label"])
+                gpu_panel = build_gpu_ane_panel(pm, nvidia, amd, extra_gpu_temp, widths["label"])
+                mem_panel = build_memory_panel(mem, widths["label"])
+                sys_panel = build_system_panel(cpu, widths["label"])
+                ollama_panel = build_ollama_panel(ollama_procs, widths)
+                coding_panel = build_coding_agents_panel(coding_procs, widths)
+                agents_panel = build_other_agents_panel(agent_procs, widths)
+
+                # Adaptive layout: stack vertically on very narrow screens
+                if term_w < 80:
+                    # Mobile portrait: full vertical stack
+                    layout["row1"].split_column(
+                        Layout(cpu_panel),
+                        Layout(mem_panel),
+                    )
+                    layout["row2"].split_column(
+                        Layout(gpu_panel),
+                        Layout(ollama_panel),
+                        Layout(coding_panel),
+                    )
+                else:
+                    # Normal/wide: horizontal layout
+                    layout["row1"].split_row(
+                        Layout(cpu_panel),
+                        Layout(gpu_panel),
+                        Layout(mem_panel),
+                    )
+                    layout["row2"].split_row(
+                        Layout(name="row2_left", ratio=3),
+                        Layout(sys_panel, ratio=1),
+                    )
+                    layout["row2_left"].split_column(
+                        Layout(ollama_panel),
+                        Layout(coding_panel),
+                    )
+
+                layout["row3"].update(agents_panel)
                 live.update(layout)
                 sleep_time = max(0.5, interval - POWERMETRICS_TIMEOUT) if (IS_MACOS and IS_ROOT) else interval
                 time.sleep(sleep_time)
